@@ -10,23 +10,24 @@
 #include "device_functions.h"
 #include <cuda.h>
 using namespace std; 
-#define villagerSize 10000
+#define villageSize 6 //村庄大小
 #define random(x) (rand()%x)
 
 void NextGeneration_CPU(int **village,int **next_village)
 {
 	int villagers=0;
-	for (int i=1;i<=villagerSize;i++){
-		for(int j=1;j<=villagerSize;j++){
+	for (int i=1;i<=villageSize;i++){
+		for(int j=1;j<=villageSize;j++){
 			villagers=0;
+			/*计算每个村民周围的村民个数*/
 			villagers=village[i-1][j-1]	+village[i-1][j]+village[i-1][j+1]
 			+village[i][j-1]	+0				+village[i][j+1]
 			+village[i+1][j-1]+village[i+1][j]+village[i+1][j+1];
-			if(villagers==3)
+			if(villagers==3)			//如果有三个，下一代生存
 				*(*(next_village+i)+j)=1;
-			else if(villagers==2)
+			else if(villagers==2)		//如果有两个，下一代保存这一代状态
 				*(*(next_village+i)+j)=*(*(village+i)+j);
-			else
+			else						//其他情况下一代死亡。
 				*(*(next_village+i)+j)=0;
 		}
 	}
@@ -36,27 +37,28 @@ void NextGeneration_CPU(int **village,int **next_village)
 
 __global__ void NextGeneration_GPU(int *g_odata, int *g_idata)
 {
-	int j = threadIdx.x;
+	int j=threadIdx.x+threadIdx.y*blockDim.x;
 	int sum=blockDim.x;
 	int villagers[1024];
-	if(j%(villagerSize+2)==0||j%(villagerSize+2)==villagerSize+1||j<villagerSize+2||j>=(villagerSize+2)*(villagerSize+1))	villagers[j]=0;
+	if(j%(villageSize+2)==0||j%(villageSize+2)==villageSize+1||j<villageSize+2||j>=(villageSize+2)*(villageSize+1))	villagers[j]=0;
 	else
 	{
 		villagers[j]=0;
-		villagers[j]=	*(g_idata+j-villagerSize-3)
-			+*(g_idata+j-villagerSize-2)
-			+*(g_idata+j-villagerSize-1)
+		/*计算每个村民周围的村民个数*/
+		villagers[j]=	*(g_idata+j-villageSize-3)
+			+*(g_idata+j-villageSize-2)
+			+*(g_idata+j-villageSize-1)
 			+*(g_idata+j-1)
 			+*(g_idata+j+1)
-			+*(g_idata+j+villagerSize+1)
-			+*(g_idata+j+villagerSize+2)
-			+*(g_idata+j+villagerSize+3);
+			+*(g_idata+j+villageSize+1)
+			+*(g_idata+j+villageSize+2)
+			+*(g_idata+j+villageSize+3);
 
-		if(villagers[j]!=2&&villagers[j]!=3)
+		if(villagers[j]!=2&&villagers[j]!=3)	//如果不为2或3个，下一代死亡
 			*(g_odata+j)=0;
-		if(villagers[j]==3)
+		if(villagers[j]==3)				//如果有三个，下一代生存
 			*(g_odata+j)=1;
-		if(villagers[j]==2)
+		if(villagers[j]==2)				//如果有两个，下一代保存这一代状态
 			*(g_odata+j)=*(g_idata+j);
 		int a=0;
 	}
@@ -68,134 +70,124 @@ __global__ void NextGeneration_GPU(int *g_odata, int *g_idata)
 
 int main() 
 {
-	int Generation=1;
-	 LARGE_INTEGER t_start,t_end,freq;
-  float ms;
-  QueryPerformanceFrequency(&freq);
-	int *villageA, *villageB;
-	villageA = (int *)malloc(sizeof(int *) * (villagerSize+2)* (villagerSize+2));
-	villageB = (int *)malloc(sizeof(int *) * (villagerSize+2)* (villagerSize+2));
-	for(int i=0;i<=villagerSize+1;i++){
-		for(int j=0;j<=villagerSize+1;j++){
-			villageA[i*(villagerSize+2)+j]=0;
-			villageB[i*(villagerSize+2)+j]=0;
+	int Generation=1;	//代数
+	/*计时变量*/
+	LARGE_INTEGER t_start,t_end,freq;
+	float ms;
+	QueryPerformanceFrequency(&freq);
+	//GPU 村落初始化
+	int *GPUvillageA, *GPUvillageB;//使用两个数组交替表示两代村民
+	GPUvillageA = (int *)malloc(sizeof(int *) * (villageSize+2)* (villageSize+2));
+	GPUvillageB = (int *)malloc(sizeof(int *) * (villageSize+2)* (villageSize+2));
+	for(int i=0;i<=villageSize+1;i++){
+		for(int j=0;j<=villageSize+1;j++){
+			GPUvillageA[i*(villageSize+2)+j]=0;
+			GPUvillageB[i*(villageSize+2)+j]=0;
 		}
 	}
-
-	for(int i=1;i<=villagerSize;i++){
-		for(int j=1;j<=villagerSize;j++){
+	/*使用随机变量构造初代,40%的存活率*/
+	for(int i=1;i<=villageSize;i++){
+		for(int j=1;j<=villageSize;j++){
 			if(random(10)>4)
-				villageA[i*(villagerSize+2)+j]=1;
+				GPUvillageA[i*(villageSize+2)+j]=1;
 			else
-				villageA[i*(villagerSize+2)+j]=0;
+				GPUvillageA[i*(villageSize+2)+j]=0;
 		}
 	}
-	for(int i=1;i<=villagerSize;i++){
-		for(int j=1;j<=villagerSize;j++){
-	//		cout<<villageA[i*(villagerSize+2)+j]<<" ";
-		}
-	//	cout<<endl;
-	}
-//	cout<<"OK"<<endl;
-//	getchar();
 
-	//CPU
-	/*
-	for(Generation=1;Generation<3000;Generation++)
+	//CPU 村落初始化
+	int **CPUvillageA, **CPUvillageB;//使用两个数组交替表示两代村民
+	/*声明动态空间*/
+	CPUvillageA = (int **)malloc(sizeof(int *) * villageSize+2);
+	CPUvillageB = (int **)malloc(sizeof(int *) * villageSize+2);
+	for(int i=0; i<villageSize+2; i++)
 	{
-	if(Generation%2==1){
-	NextGeneration_CPU(villageA,villageB);
-	for(int i=1;i<=villagerSize;i++){
-	for(int j=1;j<=villagerSize;j++){
-	cout<<villageB[i][j]<<" ";
+		CPUvillageA[i] = (int *)malloc(sizeof(int) * villageSize+2);
+		CPUvillageB[i] = (int *)malloc(sizeof(int) * villageSize+2);
 	}
-	cout<<endl;
+	/*初始化数组*/
+	for(int i=0;i<=villageSize+1;i++){
+		*((CPUvillageA[i])+0)=0;
+		*((CPUvillageA[0])+i)=0;
+		*((CPUvillageA[i])+villageSize+1)=0;
+		*((CPUvillageA[villageSize+1])+i)=0;
 	}
+	/*使用随机变量构造初代,40%的存活率*/
+	for(int i=1;i<=villageSize;i++){
+		for(int j=1;j<=villageSize;j++){
+			if(random(10)>4)
+				*((CPUvillageA[i])+j)=1;
+			else
+				*((CPUvillageA[i])+j)=0;
+		}
 	}
-	else{
-	NextGeneration_CPU(villageB,villageA);
-	for(int i=1;i<=villagerSize;i++){
-	for(int j=1;j<=villagerSize;j++){
-	cout<<villageA[i][j]<<" ";
+
+
+	/*CPU进化*/
+	QueryPerformanceCounter(&t_start);
+	for(Generation=1;Generation<1000;Generation++)
+	{
+		if(Generation%2==1){
+			NextGeneration_CPU(CPUvillageA,CPUvillageB);
+		}
+		else{
+			NextGeneration_CPU(CPUvillageB,CPUvillageA);
+		}
 	}
-	cout<<endl;
-	}
-	}
-	getchar();
-	}
-	*/
+	QueryPerformanceCounter(&t_end);
+	ms=1e3*(t_end.QuadPart-t_start.QuadPart)/freq.QuadPart;
+	cout<<"CPU runTime: "<<ms<<endl;
 
+	/*GPU进化*/
+	int num_elements, mem_size;
+	int *d_idata, *d_odata;	
 
-
-
-
-
-
-	int num_elements, num_threads, mem_size, shared_mem_size;
-
-	int *d_idata, *d_odata;
-
-
-	num_elements = (villagerSize+2)*(villagerSize+2);
-	num_threads  = num_elements;
+	num_elements = (villageSize+2)*(villageSize+2);
 	mem_size     = sizeof(int) * num_elements;
 
 
 	cudaMalloc((void**)&d_idata, mem_size);
 	cudaMalloc((void**)&d_odata, mem_size);
 
-	cudaMemcpy(d_idata, villageA, mem_size, cudaMemcpyHostToDevice);
-	cudaMemcpy(d_odata, villageB, mem_size, cudaMemcpyHostToDevice);
-
-	shared_mem_size = sizeof(int) * num_elements;
+	cudaMemcpy(d_idata, GPUvillageA, mem_size, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_odata, GPUvillageB, mem_size, cudaMemcpyHostToDevice);
 
 
-	  QueryPerformanceCounter(&t_start);
+	QueryPerformanceCounter(&t_start);
 
-	for(Generation=1;Generation<10;Generation++)
+	for(Generation=1;Generation<1000;Generation++)
 	{
 		if(Generation%2==1){
-			NextGeneration_GPU<<<1,num_threads>>>(d_odata,d_idata);
-			cudaMemcpy(villageB, d_odata, mem_size,cudaMemcpyDeviceToHost);			
-				for(int i=1;i<=villagerSize;i++){
-					for(int j=1;j<=villagerSize;j++){
-				//		cout<<villageB[i*(villagerSize+2)+j]<<" ";
-					}
-				//	cout<<endl;
-				}
-			cudaMemcpy(d_idata, villageB, mem_size, cudaMemcpyHostToDevice);
+			if(num_elements<1024)
+				NextGeneration_GPU<<<1,num_elements>>>(d_odata,d_idata);
+			else
+				NextGeneration_GPU<<<num_elements/1024,1024>>>(d_odata,d_idata);
+			cudaMemcpy(GPUvillageB, d_odata, mem_size,cudaMemcpyDeviceToHost);			
+			cudaMemcpy(d_idata, GPUvillageB, mem_size, cudaMemcpyHostToDevice);
 		}
 		else{
-			NextGeneration_GPU<<<1,num_threads>>>(d_odata,d_idata);
-			cudaMemcpy(villageA, d_odata, mem_size,cudaMemcpyDeviceToHost);						
-				for(int i=1;i<=villagerSize;i++){
-					for(int j=1;j<=villagerSize;j++){
-				//		cout<<villageA[i*(villagerSize+2)+j]<<" ";
-					}
-				//	cout<<endl;
-				}
-			cudaMemcpy(d_idata, villageA, mem_size, cudaMemcpyHostToDevice);
+			if(num_elements<1024)
+				NextGeneration_GPU<<<1,num_elements>>>(d_odata,d_idata);
+			else
+				NextGeneration_GPU<<<num_elements/1024,1024>>>(d_odata,d_idata);
+			cudaMemcpy(GPUvillageA, d_odata, mem_size,cudaMemcpyDeviceToHost);						
+			cudaMemcpy(d_idata, GPUvillageA, mem_size, cudaMemcpyHostToDevice);
 		}
-	//	cout<<endl;
-		 
-
-	//	cout<<"finished"<<endl;
-	//	getchar();
 	}
 
-	 QueryPerformanceCounter(&t_end);
-	   ms=1e3*(t_end.QuadPart-t_start.QuadPart)/freq.QuadPart;
-cout<<"times"<<ms<<endl;
+	QueryPerformanceCounter(&t_end);
+	ms=1e3*(t_end.QuadPart-t_start.QuadPart)/freq.QuadPart;
+	cout<<"GPU runTime: "<<ms<<endl;
 
 
 
-		free(villageA);
-		free(villageB);
+	free(GPUvillageA);
+	free(GPUvillageB);
 
-		cudaFree(d_idata);
-		cudaFree(d_odata);
-		getchar();
-		cudaDeviceReset();
-		return 0;
+	cudaFree(d_idata);
+	cudaFree(d_odata);
+	getchar();
+	cudaDeviceReset();
+	return 0;
 
-	}
+}
